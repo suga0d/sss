@@ -4,81 +4,85 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # =================== CONFIG ===================
-TOKEN = "8532412255:AAErqUAlFsMansssdBxKo7jpiT42adw6J38"
+TOKEN = "8532412255:AAErqUAlFsMansssdBxKo7jpiT42adw6J38"   
 # ==============================================
 
 csv_lock = Lock()
 machine_status = {}
-user_files = {}  # store random filenames for each user
-
+user_files = {} 
 
 async def forwarded_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not machine_status.get(chat_id, False):
-        return  # ignore if machine off
+        return
 
-    user_id = update.effective_user.id
     message = update.message
+    user_id = update.effective_user.id
 
     # Only process forwarded messages
     if not message.forward_origin:
         return
 
+    # Accept text or captions (images)
     text = message.text or message.caption
     if not text:
-        return  # skip non-text
+        return  # forward has no text → ignore
 
-    parsed = parse_message(text)
-
-    # if user just forwarded text without /ID, store first 6 lines
+    # Process first 6 lines
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
     lines = lines[:6]
 
+    # Save to CSV
     date_str = datetime.now(timezone.utc).strftime("%m/%d/%Y")
-    row = [date_str] + lines + [""] * (5 - len(lines))  # ensure 5 columns
+    row = [date_str] + lines + [""] * (5 - len(lines))
     append_row(user_id, row)
 
-    # React with ❤️ (or silently ignore errors)
+    # React with ❤️
     try:
         await message.react("❤️")
-    except Exception:
+    except:
         pass
 
 
+# =====================================================
+#                     FILE HELPERS
+# =====================================================
 def get_user_csv(user_id: int) -> Path:
-    """Get or create a random file for this user"""
     if user_id not in user_files:
-        rand_tag = secrets.token_hex(4)  # random 8-char tag
+        rand_tag = secrets.token_hex(4)
         user_files[user_id] = f"report_{user_id}_{rand_tag}.csv"
     return Path(user_files[user_id])
 
 
 def ensure_csv(user_id: int):
-    """Ensure file exists with headers"""
     csv_path = get_user_csv(user_id)
     if not csv_path.exists():
         with csv_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["date", "id_number", "amount", "category", "username"])
+            writer.writerow(["date", "line1", "line2", "line3", "line4", "line5"])
 
 
 def clear_csv(user_id: int):
-    """Delete or reset file"""
     csv_path = get_user_csv(user_id)
     if csv_path.exists():
         csv_path.unlink()
     ensure_csv(user_id)
 
 
-# ------------------ Parse message ------------------
+# =====================================================
+#               PARSER FOR /ID MESSAGES
+# =====================================================
 def parse_message(text: str):
-    """Parse message like /ID 136947097 ..."""
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
-
-    # ✅ Keep only first 6 lines
     lines = lines[:6]
 
     parsed = {"id_number": "", "amount": "", "category": "", "username": ""}
@@ -91,14 +95,16 @@ def parse_message(text: str):
         if len(lines) > 2:
             parsed["category"] = lines[2]
         if len(lines) > 3:
-            parsed["username"] = lines[-1]  # last line usually username
-    except Exception:
+            parsed["username"] = lines[-1]
+    except:
         pass
 
     return parsed
 
 
-# ------------------ Write to CSV ------------------
+# =====================================================
+#                   CSV WRITE FUNCTION
+# =====================================================
 def append_row(user_id: int, row: list):
     csv_path = get_user_csv(user_id)
     with csv_lock:
@@ -107,12 +113,14 @@ def append_row(user_id: int, row: list):
             writer.writerow(row)
 
 
-# ------------------ Commands ------------------
+# =====================================================
+#                   COMMAND HANDLERS
+# =====================================================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     machine_status[chat_id] = True
     ensure_csv(update.effective_user.id)
-    await update.message.reply_text("🟢 Machine started — ready to record /ID messages.")
+    await update.message.reply_text("🟢 Machine started — ready to record messages.")
 
 
 async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,7 +138,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     csv_path = get_user_csv(user_id)
-    print("your bot have been send file ")
+
     if not csv_path.exists():
         await update.message.reply_text("⚠️ You don't have any saved records yet.")
         return
@@ -142,14 +150,13 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def id_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not machine_status.get(chat_id, False):
-        return  # Ignore silently if machine off
+        return
 
     user_id = update.effective_user.id
-    text = update.message.text
-    parsed = parse_message(text)
+    parsed = parse_message(update.message.text)
 
     if not parsed["id_number"]:
-        return  # invalid /ID, ignore silently
+        return  # ignore invalid /ID
 
     date_str = datetime.now(timezone.utc).strftime("%m/%d/%Y")
     row = [
@@ -163,18 +170,25 @@ async def id_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await update.message.react("❤️")
-    except Exception:
-        await update.message.reply_text("save ✅")
+    except:
+        await update.message.reply_text("Saved ❤️")
 
 
-# ------------------ Main ------------------
+# =====================================================
+#                        MAIN
+# =====================================================
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # Commands
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("stop", stop_handler))
     app.add_handler(CommandHandler("file", file_handler))
     app.add_handler(CommandHandler("clear", clear_handler))
-    app.add_handler(CommandHandler("ID", id_handler))
+    app.add_handler(CommandHandler("id", id_handler))
+
+    # Handle forwarded messages (text or photo caption)
+    app.add_handler(MessageHandler(filters.FORWARDED, forwarded_message_handler))
 
     print("Bot started ✅ Press Ctrl+C to stop.")
     app.run_polling()
